@@ -1743,14 +1743,36 @@ class AutoApplyManager:
             desired = self._desired_for(eid, schedules, settings, now_min)
             if desired is None:
                 continue
-            # Manual override guard: if the thermostat target differs from the
-            # scheduled value, do not force it back until the next block boundary.
-            # Guard is only active from 5 min after block start until 5 min
-            # before block end, to keep a buffer around boundaries.
-            # (Boundary ticks and resume reconciles are allowed.)
-            if not boundary_only and not reconcile:
+            # Only apply when desired setpoint changes for this entity.
+            # This prevents overriding manual thermostat changes just because
+            # another room hits a new block (or any global refresh runs).
+            #
+            # Exceptions:
+            # - On resume from pause we reconcile to the desired setpoint even
+            #   if it hasn't changed (reconcile=True).
+            last = self._last_applied.get(eid) or {}
+            try:
+                lt = last.get("temp")
+                last_temp = float(lt) if isinstance(lt, (int, float, str)) else None
+            except Exception:
+                last_temp = None
+            schedule_unchanged = (last_temp is not None) and abs(last_temp - float(desired)) < 0.05
+            if (not reconcile) and schedule_unchanged:
+                continue
+            # Manual override guard: only relevant when OUR desired value for this
+            # entity hasn't changed (schedule_unchanged) - i.e. someone turned the
+            # physical thermostat away from what we last set, and we shouldn't
+            # immediately fight that until the next block boundary. When the
+            # desired value HAS changed (a block/holiday/profile edit, presence
+            # change, etc. - which is exactly what schedule_unchanged=False and
+            # the check above already let through), the guard must never apply:
+            # otherwise every edit made while sitting in the middle of a block's
+            # active window (more than 5 min past its start) looks identical to a
+            # manual override and gets silently dropped.
+            # Guard window is 5 min after block start until 5 min before block end.
+            # (Boundary ticks and resume reconciles are allowed to bypass it.)
+            if not boundary_only and not reconcile and schedule_unchanged:
                 try:
-                    # Check if guard window is active for this entity right now
                     guard_active = False
                     try:
                         primary = None
@@ -1785,8 +1807,6 @@ class AutoApplyManager:
                     except Exception:
                         guard_active = False
 
-                    if not guard_active:
-                        pass
                     st = self.hass.states.get(eid)
                     cur = None
                     if st is not None:
@@ -1823,21 +1843,6 @@ class AutoApplyManager:
                             continue
                 except Exception:
                     pass
-            # Only apply when desired setpoint changes for this entity.
-            # This prevents overriding manual thermostat changes just because
-            # another room hits a new block (or any global refresh runs).
-            #
-            # Exceptions:
-            # - On resume from pause we reconcile to the desired setpoint even
-            #   if it hasn't changed (reconcile=True).
-            last = self._last_applied.get(eid) or {}
-            try:
-                lt = last.get("temp")
-                last_temp = float(lt) if isinstance(lt, (int, float, str)) else None
-            except Exception:
-                last_temp = None
-            if (not reconcile) and (last_temp is not None) and abs(last_temp - float(desired)) < 0.05:
-                continue
             # If current equals desired, just update cache
             st = self.hass.states.get(eid)
             cur = None
@@ -2586,7 +2591,10 @@ class AutoApplyManager:
                 if not (do_turn_on and isinstance(eid, str) and eid.startswith("climate.")):
                     return
                 try:
-                    await self.hass.services.async_call("climate", "turn_on", {"entity_id": eid}, blocking=False)
+                    # blocking=True so ServiceNotSupported (e.g. room thermostats
+                    # that only support set_temperature) is actually caught here
+                    # instead of surfacing as an unhandled error in the HA log.
+                    await self.hass.services.async_call("climate", "turn_on", {"entity_id": eid}, blocking=True)
                 except Exception:
                     return
                 try:
@@ -2743,7 +2751,7 @@ class AutoApplyManager:
                         pass
                     try:
                         if do_turn_on:
-                            await self.hass.services.async_call("climate", "turn_on", {"entity_id": eid}, blocking=False)
+                            await self.hass.services.async_call("climate", "turn_on", {"entity_id": eid}, blocking=True)
                     except Exception:
                         pass
                 return True
@@ -3099,14 +3107,33 @@ class OpenWindowManager:
         except Exception:
             return
 
+    async def _turn_climate(self, eid: str, service: str) -> None:
+        """Best-effort climate.turn_on/turn_off for one entity.
+
+        Many room thermostats (e.g. Danfoss/Devolo paired with a separate
+        radiator valve) only support set_temperature/set_hvac_mode and raise
+        ServiceNotSupported for turn_on/turn_off. With blocking=False (the
+        previous behaviour) that exception is raised inside HA's own background
+        service-call task, *after* this function's try/except has already
+        returned - so it always ended up as an unhandled error in the HA log
+        regardless of any wrapping try/except here. Awaiting with
+        blocking=True makes the exception observable (and therefore catchable)
+        at the call site, so an unsupported entity is skipped quietly instead.
+        """
+        if not (isinstance(eid, str) and eid.startswith("climate.")):
+            return
+        try:
+            await self.hass.services.async_call("climate", service, {"entity_id": eid}, blocking=True)
+        except Exception:
+            pass
+
     async def _suspend_room(self, room: str, settings: dict) -> None:
         try:
             entities = self._entities_for_room(room, settings)
             for eid in entities:
                 self._suspended_entities.add(eid)
             for eid in entities:
-                if isinstance(eid, str) and eid.startswith("climate."):
-                    await self.hass.services.async_call("climate", "turn_off", {"entity_id": eid}, blocking=False)
+                await self._turn_climate(eid, "turn_off")
         except Exception:
             return
 
@@ -3119,8 +3146,7 @@ class OpenWindowManager:
                 except Exception:
                     pass
             for eid in entities:
-                if isinstance(eid, str) and eid.startswith("climate."):
-                    await self.hass.services.async_call("climate", "turn_on", {"entity_id": eid}, blocking=False)
+                await self._turn_climate(eid, "turn_on")
                 try:
                     await self._mgr.async_apply_entity_now(eid, reconcile=True)
                 except Exception:
@@ -3135,8 +3161,7 @@ class OpenWindowManager:
             to_resume = list(self._suspended_entities)
             self._suspended_entities.clear()
             for eid in to_resume:
-                if isinstance(eid, str) and eid.startswith("climate."):
-                    await self.hass.services.async_call("climate", "turn_on", {"entity_id": eid}, blocking=False)
+                await self._turn_climate(eid, "turn_on")
                 try:
                     await self._mgr.async_apply_entity_now(eid, reconcile=True)
                 except Exception:

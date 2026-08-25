@@ -13,7 +13,7 @@ If you find this project useful, you can support me on Ko-fi 💙
 Thermostat Pro Timeline is a Home Assistant solution composed of:
 
 - A custom integration (`thermostat_timeline`) that provides a shared schedules store, background control, backup/restore, and a small HTTP API used by the card.
-- A Lovelace card (`custom:thermostat-pro-timeline`) for visual 24‑hour timeline planning, with advanced features like weekdays, profiles, presence and holidays.
+- A Lovelace card (`custom:thermostat-timeline-card`) for visual 24‑hour timeline planning, with advanced features like weekdays, profiles, presence and holidays.
 
 
 <img width="2288" height="476" alt="image" src="https://github.com/user-attachments/assets/95a17e9d-e404-4bad-ba93-5af0a6cff6d5" />
@@ -126,7 +126,7 @@ Thermostat Pro Timeline is a Home Assistant solution composed of:
 Add the card to any dashboard view:
 
 ```yaml
-type: custom:thermostat-pro-timeline
+type: custom:thermostat-timeline-card
 title: Heating timeline
 entities:
 	- climate.living_room
@@ -260,7 +260,7 @@ Shared storage, sync, backup
 Example: a richer card
 
 ```yaml
-type: custom:thermostat-pro-timeline
+type: custom:thermostat-timeline-card
 title: Thermostat Pro Timeline
 entities:
 	- climate.living_room

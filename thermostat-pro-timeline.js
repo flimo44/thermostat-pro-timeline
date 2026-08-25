@@ -4577,6 +4577,14 @@ class ThermostatTimelineCard extends HTMLElement {
     if (!this._initialized) {
       this._initialized = true;
       this._init();
+      // Must happen before the first _loadStore(): the in-card settings popup
+      // is the only way most users set "Configuration ID" (it has no path to
+      // rewrite the dashboard's YAML, only the separate HA card editor does),
+      // so the persisted value lives in localStorage. Previously this only
+      // ran when the settings popup was opened, by which point the initial
+      // load had already fetched the wrong (default/shared) instance's data -
+      // making independent per-card instances collapse into one on reload (#63).
+      try { this._hydrateInstanceCfgFromLocal(); } catch {}
       this._loadStore(true).then(async () => {
         this._ensureSchedules();
         // Ensure labels/merges/temp_sensors from backend are reflected in config before first render
@@ -4654,13 +4662,22 @@ class ThermostatTimelineCard extends HTMLElement {
     this._yamlProvided = {
       labels: Object.prototype.hasOwnProperty.call(config, 'labels'),
       merges: Object.prototype.hasOwnProperty.call(config, 'merges'),
-      color_ranges: Object.prototype.hasOwnProperty.call(config, 'color_ranges'),
-      default_temp: Object.prototype.hasOwnProperty.call(config, 'default_temp'),
-      min_temp: Object.prototype.hasOwnProperty.call(config, 'min_temp'),
-      max_temp: Object.prototype.hasOwnProperty.call(config, 'max_temp'),
       temp_sensors: Object.prototype.hasOwnProperty.call(config, 'temp_sensors'),
       turn_on: Object.prototype.hasOwnProperty.call(config, 'turn_on'),
-      // Boiler settings are storage-driven; do not lock them from Lovelace/YAML defaults.
+      away: Object.prototype.hasOwnProperty.call(config, 'away'),
+      // Everything below is edited via the in-card popup/editor and stored in
+      // shared/local storage (see _emit()'s exclusion list, which strips these
+      // same keys before writing config back to YAML). They must never be
+      // treated as "explicitly provided by YAML", or the visual editor's own
+      // round-trip (which re-sends the *current* value as part of the config
+      // object) permanently locks out any future update coming from storage -
+      // this is what broke the Pause-sensor setting (#54) and 24h time format
+      // (#45): once saved once via the editor, hasOwnProperty(config, key) was
+      // always true from then on, even though the user never touched YAML.
+      color_ranges: false,
+      default_temp: false,
+      min_temp: false,
+      max_temp: false,
       boiler_enabled: false,
       boiler_switch: false,
       boiler_switch_domain: false,
@@ -4670,25 +4687,23 @@ class ThermostatTimelineCard extends HTMLElement {
       boiler_temp_sensor: false,
       boiler_min_temp: false,
       boiler_max_temp: false,
-      show_pause_button: Object.prototype.hasOwnProperty.call(config, 'show_pause_button'),
-      show_room_temp: Object.prototype.hasOwnProperty.call(config, 'show_room_temp'),
-      pause_sensor_enabled: Object.prototype.hasOwnProperty.call(config, 'pause_sensor_enabled'),
-      pause_sensor_entity: Object.prototype.hasOwnProperty.call(config, 'pause_sensor_entity'),
-      away: Object.prototype.hasOwnProperty.call(config, 'away'),
-      time_12h: Object.prototype.hasOwnProperty.call(config, 'time_12h'),
-      time_source: Object.prototype.hasOwnProperty.call(config, 'time_source'),
-      temp_unit: Object.prototype.hasOwnProperty.call(config, 'temp_unit'),
-      // Holiday settings are storage-driven; do not lock them from Lovelace/YAML defaults.
+      show_pause_button: false,
+      show_room_temp: false,
+      pause_sensor_enabled: false,
+      pause_sensor_entity: false,
+      time_12h: false,
+      time_source: false,
+      temp_unit: false,
       holidays_enabled: false,
       holidays_source: false,
       holidays_entity: false,
       holidays_dates: false,
       presence_live_header: false,
-      presence_sensor_enabled: Object.prototype.hasOwnProperty.call(config, 'presence_sensor_enabled'),
-      presence_sensors: Object.prototype.hasOwnProperty.call(config, 'presence_sensors'),
-      presence_sensor_temps: Object.prototype.hasOwnProperty.call(config, 'presence_sensor_temps'),
-      presence_sensor_delays: Object.prototype.hasOwnProperty.call(config, 'presence_sensor_delays'),
-      presence_sensor_delay_units: Object.prototype.hasOwnProperty.call(config, 'presence_sensor_delay_units'),
+      presence_sensor_enabled: false,
+      presence_sensors: false,
+      presence_sensor_temps: false,
+      presence_sensor_delays: false,
+      presence_sensor_delay_units: false,
     };
 
     this._config = {
@@ -4713,6 +4728,13 @@ class ThermostatTimelineCard extends HTMLElement {
       storage_enabled: !!(config.storage_enabled ?? true),
       instance_enabled: !!(config.instance_enabled ?? false),
       instance_id: String(config.instance_id ?? ''),
+      // The editor generates + persists this stable per-card id into YAML (see
+      // ThermostatTimelineCardEditor.setConfig/_emit), but the rendered card
+      // itself never read it back - so _instanceCfgLocalKey() always fell
+      // through to its unstable page/DOM-order-based fallback key, which
+      // doesn't survive a reload. That's what made "Configuration ID" reset
+      // to off after saving (#63).
+      instance_uid: String(config.instance_uid ?? (this._config?.instance_uid ?? '')),
   storage_sync_mode: (config.storage_sync_mode === 'delay' ? 'delay' : 'instant'),
   storage_sync_min: Number.isFinite(config.storage_sync_min) ? Math.max(0, Math.min(1440, Number(config.storage_sync_min))) : (this._config?.storage_sync_min ?? 5),
   storage_sync_sec: Number.isFinite(config.storage_sync_sec)

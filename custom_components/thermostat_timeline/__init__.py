@@ -2549,6 +2549,34 @@ class AutoApplyManager:
                 settings = {}
                 schedules = {}
 
+            # Per-room "Enable schedule updates" toggle: when disabled for this
+            # room, the schedule keeps being tracked/stored but nothing is ever
+            # pushed to the actual entity (no set_temperature, set_hvac_mode,
+            # turn_on, or input_number.set_value). Applies to both climate and
+            # input_number rooms. Defaults to enabled when the key is absent,
+            # so existing configs keep behaving exactly as before this change.
+            try:
+                apply_map = settings.get("apply_enabled") or {}
+                primary_for_apply = eid
+                if isinstance(apply_map, dict) and eid not in apply_map:
+                    merges = settings.get("merges") or {}
+                    if isinstance(merges, dict):
+                        for p, lst in merges.items():
+                            try:
+                                if eid in (lst or []):
+                                    primary_for_apply = p
+                                    break
+                            except Exception:
+                                continue
+                apply_enabled = True
+                if isinstance(apply_map, dict) and primary_for_apply in apply_map:
+                    apply_enabled = bool(apply_map.get(primary_for_apply))
+                if not apply_enabled:
+                    return False
+            except Exception:
+                # Never let this optional gate block a legitimate apply on error.
+                pass
+
             # Optional: for some thermostats we need to send a climate.turn_on command as well.
             # This is configured per primary room entity (merged entities inherit the primary room setting).
             do_turn_on = False

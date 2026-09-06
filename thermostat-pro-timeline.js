@@ -63,6 +63,9 @@ const TT_I18N = {
     'editor.turn_on.order.before': 'Before set_temperature',
     'editor.turn_on.order.after': 'After set_temperature',
 
+    'editor.apply_enabled.title': 'Apply schedule to this thermostat',
+    'editor.apply_enabled.desc': 'When disabled, the schedule is still tracked and shown, but temperature and mode changes are never sent to this entity. Useful to keep a schedule ready without touching a thermostat you turned off manually.',
+
     'editor.merge_label': 'Merge with (add extra thermostat)',
     'editor.display_name_optional': 'Room name (optional)',
     'editor.merged_with': 'Merged with',
@@ -4620,6 +4623,7 @@ class ThermostatTimelineCard extends HTMLElement {
       const hasAnyMerge = this._config.merges && typeof this._config.merges==='object' && Object.keys(this._config.merges).length>0;
       const hasAnySensors = this._config.temp_sensors && typeof this._config.temp_sensors==='object' && Object.keys(this._config.temp_sensors).length>0;
       const hasAnyTurnOn = this._config.turn_on && typeof this._config.turn_on==='object' && Object.keys(this._config.turn_on).length>0;
+      const hasAnyApplyEnabled = this._config.apply_enabled && typeof this._config.apply_enabled==='object' && Object.keys(this._config.apply_enabled).length>0;
       if (hasAnyLabel && hasAnyMerge && hasAnySensors && hasAnyTurnOn) return;
       const api = await this._apiFetchState();
       const s = api?.settings || {};
@@ -4628,6 +4632,7 @@ class ThermostatTimelineCard extends HTMLElement {
       if (!hasAnyMerge && s.merges && typeof s.merges==='object' && Object.keys(s.merges).length){ this._config.merges = { ...s.merges }; changed = true; }
       if (!hasAnySensors && s.temp_sensors && typeof s.temp_sensors==='object' && Object.keys(s.temp_sensors).length){ this._config.temp_sensors = { ...s.temp_sensors }; changed = true; }
       if (!hasAnyTurnOn && s.turn_on && typeof s.turn_on==='object' && Object.keys(s.turn_on).length){ this._config.turn_on = { ...s.turn_on }; changed = true; }
+      if (!hasAnyApplyEnabled && s.apply_enabled && typeof s.apply_enabled==='object' && Object.keys(s.apply_enabled).length){ this._config.apply_enabled = { ...s.apply_enabled }; changed = true; }
       if (changed){
         try { const payload = this._makeStoragePayload(true); localStorage.setItem(this._localStoreKey(), JSON.stringify(payload)); } catch {}
       }
@@ -4796,6 +4801,7 @@ class ThermostatTimelineCard extends HTMLElement {
       merges: { ...(config.merges || {}) },
     temp_sensors: { ...(config.temp_sensors || {}) },
   turn_on: { ...(config.turn_on || {}) },
+  apply_enabled: { ...(config.apply_enabled || {}) },
   boiler_enabled: !!(config.boiler_enabled ?? this._config?.boiler_enabled ?? false),
   boiler_switch: String(config.boiler_switch ?? this._config?.boiler_switch ?? ''),
   boiler_switch_domain: (()=>{
@@ -5648,6 +5654,7 @@ class ThermostatTimelineCard extends HTMLElement {
             if (s.labels && typeof s.labels === 'object' && !this._yamlProvided?.labels) this._config.labels = { ...s.labels };
             if (s.temp_sensors && typeof s.temp_sensors === 'object' && !this._yamlProvided?.temp_sensors) this._config.temp_sensors = { ...s.temp_sensors };
             if (s.turn_on && typeof s.turn_on === 'object' && !this._yamlProvided?.turn_on) this._config.turn_on = { ...s.turn_on };
+            if (s.apply_enabled && typeof s.apply_enabled === 'object' && !this._yamlProvided?.apply_enabled) this._config.apply_enabled = { ...s.apply_enabled };
             if (s.presence_sensors && typeof s.presence_sensors === 'object' && !this._yamlProvided?.presence_sensors) this._config.presence_sensors = { ...s.presence_sensors };
             try {
               if (s.presence_sensor_temps && typeof s.presence_sensor_temps === 'object' && !this._yamlProvided?.presence_sensor_temps) {
@@ -5720,6 +5727,11 @@ class ThermostatTimelineCard extends HTMLElement {
                 if (!this._yamlProvided?.turn_on && (!s.turn_on || typeof s.turn_on !== 'object' || isEmptyObj(s.turn_on))) {
                   if (ls.turn_on && typeof ls.turn_on === 'object') {
                     this._config.turn_on = { ...(this._config.turn_on || {}), ...ls.turn_on };
+                  }
+                }
+                if (!this._yamlProvided?.apply_enabled && (!s.apply_enabled || typeof s.apply_enabled !== 'object' || isEmptyObj(s.apply_enabled))) {
+                  if (ls.apply_enabled && typeof ls.apply_enabled === 'object') {
+                    this._config.apply_enabled = { ...(this._config.apply_enabled || {}), ...ls.apply_enabled };
                   }
                 }
                 if (!this._yamlProvided?.presence_sensors && (!s.presence_sensors || typeof s.presence_sensors !== 'object' || isEmptyObj(s.presence_sensors))) {
@@ -6657,6 +6669,22 @@ class ThermostatTimelineCard extends HTMLElement {
   }
   async _applySetpointForEntity(eid, desiredC){
     try {
+      // Per-room "Enable schedule updates" toggle: when disabled for this room,
+      // the timeline still tracks/stores the schedule and shows it in the UI,
+      // but never pushes anything to the actual entity (no set_temperature,
+      // no set_hvac_mode, no turn_on). Defaults to enabled when the key is
+      // absent, so existing configs keep working unchanged.
+      const applyEnabled = (() => {
+        try {
+          const map = (this._config?.apply_enabled && typeof this._config.apply_enabled === 'object') ? this._config.apply_enabled : {};
+          if (Object.prototype.hasOwnProperty.call(map, eid)) return !!map[eid];
+          const primary = this._groupPrimaryOf ? this._groupPrimaryOf(eid) : null;
+          if (primary && Object.prototype.hasOwnProperty.call(map, primary)) return !!map[primary];
+        } catch {}
+        return true;
+      })();
+      if (!applyEnabled) return;
+
       const dom = String(eid||'').split('.')[0] || '';
       if (dom === 'input_number') {
         // Mirror climate behavior: send in configured display/service unit (°C or °F)
@@ -6880,6 +6908,7 @@ class ThermostatTimelineCard extends HTMLElement {
         labels: this._config.labels,
         temp_sensors: this._config.temp_sensors,
         turn_on: this._config.turn_on,
+        apply_enabled: this._config.apply_enabled,
 
         presence_sensor_enabled: !!(this._config.presence_sensor_enabled ?? false),
         presence_live_header: !!(this._config.presence_live_header ?? true),
@@ -8352,6 +8381,12 @@ class ThermostatTimelineCard extends HTMLElement {
   }
   /* Current temperature bubble */
   .sensor-bubble{ display:inline-flex; align-items:center; gap:6px; margin-left:8px; padding:2px 8px; border:1px solid var(--divider-color); border-radius:999px; background: var(--secondary-background-color, rgba(0,0,0,.05)); color: var(--primary-text-color); font-size:.78rem; }
+  /* Quick per-room schedule enable switch shown directly in the timeline header */
+  .row-apply-toggle{ display:inline-flex; align-items:center; gap:4px; margin-left:6px; }
+  .row-apply-toggle ha-switch{ transform:scale(.78); transform-origin:left center; margin-right:-8px; }
+  .row-apply-toggle .apply-state{ font-size:.72rem; color:var(--secondary-text-color); white-space:nowrap; }
+  .track.schedule-disabled{ filter:grayscale(1); opacity:.42; transition:filter .2s ease, opacity .2s ease; }
+
     .btn{cursor:pointer;border:1px solid var(--divider-color);border-radius:10px;padding:6px 10px;font-size:.8rem;background:var(--card-background-color);color:var(--primary-text-color)}
   /* Make row toolbar buttons a bit lower than default */
   .row-head .btn{ padding:4px 10px; border-radius:8px; font-size:.78rem; }
@@ -10430,6 +10465,53 @@ class ThermostatTimelineCard extends HTMLElement {
           }
         }
       } catch {}
+
+      // Quick per-room Apply schedule toggle. This controls the exact same
+      // apply_enabled setting as the Rooms settings popup.
+      try {
+        const applyMap = (this._config?.apply_enabled && typeof this._config.apply_enabled === 'object') ? this._config.apply_enabled : {};
+        const isApplyEnabled = Object.prototype.hasOwnProperty.call(applyMap, eid) ? !!applyMap[eid] : true;
+        const quickWrap = document.createElement('span');
+        quickWrap.className = 'row-apply-toggle';
+        quickWrap.title = this._t('editor.apply_enabled.title') || 'Apply schedule to this thermostat';
+        const quickSwitch = document.createElement('ha-switch');
+        quickSwitch.checked = isApplyEnabled;
+        quickSwitch.setAttribute('aria-label', quickWrap.title);
+        const quickState = document.createElement('span');
+        quickState.className = 'apply-state';
+        quickState.textContent = isApplyEnabled ? 'ON' : 'OFF';
+        quickWrap.append(quickSwitch, quickState);
+        meta.append(quickWrap);
+
+        quickSwitch.addEventListener('change', async (e) => {
+          try {
+            const enabled = !!e.target.checked;
+            const prev = (this._config.apply_enabled && typeof this._config.apply_enabled === 'object') ? this._config.apply_enabled : {};
+            this._config.apply_enabled = { ...prev, [eid]: enabled };
+
+            // Keep the local cache coherent.
+            try {
+              const raw = localStorage.getItem(this._localStoreKey()) || '';
+              let parsed = {};
+              try { parsed = JSON.parse(raw || '{}'); } catch { parsed = {}; }
+              const schedules = parsed.schedules || {};
+              const prevSettings = parsed.settings || {};
+              const settings = { ...prevSettings, apply_enabled: { ...(prevSettings.apply_enabled || {}), ...(this._config.apply_enabled || {}) } };
+              localStorage.setItem(this._localStoreKey(), JSON.stringify({ ...parsed, schedules, settings }));
+            } catch {}
+
+            // Shared-storage/background mode: persist through the same settings path.
+            try { this._pushSettingsToStoreDebounced(); } catch {}
+            try { this._emit(true); } catch {}
+
+            // Immediate visual feedback (the next full refresh will rebuild it too).
+            quickState.textContent = enabled ? 'ON' : 'OFF';
+            const tr = rowEl.querySelector('.track');
+            if (tr) tr.classList.toggle('schedule-disabled', !enabled);
+          } catch {}
+        });
+      } catch {}
+
       // (Global Away bypass button moved to header; no per-room button)
       // (manual indicator removed)
       head.append(meta);
@@ -10578,6 +10660,11 @@ class ThermostatTimelineCard extends HTMLElement {
       rowEl.append(head);
       const track = document.createElement('div');
       track.className = 'track';
+      try {
+        const applyMap = (this._config?.apply_enabled && typeof this._config.apply_enabled === 'object') ? this._config.apply_enabled : {};
+        const enabled = Object.prototype.hasOwnProperty.call(applyMap, eid) ? !!applyMap[eid] : true;
+        if (!enabled) track.classList.add('schedule-disabled');
+      } catch {}
       track.style.setProperty('--row-height', `${this._config.row_height}px`);
   // Use browsed day in weekdays view (all rooms • one day)
   const displayDayKey = this._timelineDisplayDayKey();
@@ -11441,6 +11528,7 @@ class ThermostatTimelineCard extends HTMLElement {
         })(),
         temp_sensors: (()=>{ try { return (cfg.temp_sensors && typeof cfg.temp_sensors === 'object') ? JSON.parse(JSON.stringify(cfg.temp_sensors)) : {}; } catch { return {}; } })(),
         turn_on: (()=>{ try { return (cfg.turn_on && typeof cfg.turn_on === 'object') ? JSON.parse(JSON.stringify(cfg.turn_on)) : {}; } catch { return {}; } })(),
+        apply_enabled: (()=>{ try { return (cfg.apply_enabled && typeof cfg.apply_enabled === 'object') ? JSON.parse(JSON.stringify(cfg.apply_enabled)) : {}; } catch { return {}; } })(),
 
         default_temp: this._ttCoerceNum(cfg.default_temp, 20),
         row_height: this._ttCoerceNum(cfg.row_height, 64),
@@ -11646,6 +11734,21 @@ class ThermostatTimelineCard extends HTMLElement {
             out[primary] = { enabled, order };
           }
           cfg.turn_on = out;
+        } catch {}
+
+        // Per-room "Enable schedule updates" toggle: keep only for active rooms.
+        // Defaults to enabled (true) when the user never touched the toggle,
+        // so absence of a key means "apply as before" for backward compat.
+        try {
+          const src = (d.apply_enabled && typeof d.apply_enabled === 'object') ? d.apply_enabled : {};
+          const out = {};
+          for (let i=0;i<ents.length;i++) {
+            const primary = ents[i];
+            if (Object.prototype.hasOwnProperty.call(src, primary)) {
+              out[primary] = !!src[primary];
+            }
+          }
+          cfg.apply_enabled = out;
         } catch {}
       } catch {}
 
@@ -12220,6 +12323,7 @@ class ThermostatTimelineCard extends HTMLElement {
               } catch {}
               try { if (this._settingsDraft.temp_sensors && this._settingsDraft.temp_sensors[oldEid]) { const next = { ...(this._settingsDraft.temp_sensors||{}) }; delete next[oldEid]; this._settingsDraft.temp_sensors = next; } } catch {}
               try { if (this._settingsDraft.turn_on && this._settingsDraft.turn_on[oldEid]) { const next = { ...(this._settingsDraft.turn_on||{}) }; delete next[oldEid]; this._settingsDraft.turn_on = next; } } catch {}
+              try { if (this._settingsDraft.apply_enabled && Object.prototype.hasOwnProperty.call(this._settingsDraft.apply_enabled, oldEid)) { const next = { ...(this._settingsDraft.apply_enabled||{}) }; delete next[oldEid]; this._settingsDraft.apply_enabled = next; } } catch {}
               try { if (this._settingsDraft.presence_sensors && this._settingsDraft.presence_sensors[oldEid]) { const next = { ...(this._settingsDraft.presence_sensors||{}) }; delete next[oldEid]; this._settingsDraft.presence_sensors = next; } } catch {}
               this._settingsDraft.entities[idx] = '';
             }
@@ -12385,6 +12489,61 @@ class ThermostatTimelineCard extends HTMLElement {
         turnOnWrap.append(turnOnRow, turnOnOrderRow);
         try { if (useInput) turnOnWrap.style.display = 'none'; } catch {}
 
+        // Per-room: enable/disable applying the schedule to the actual entity.
+        // Mirrors the turn_on toggle's structure but is a single switch (no
+        // order option): defaults to enabled when the key is absent.
+        const applyWrap = document.createElement('div');
+        applyWrap.style.display = 'grid';
+        applyWrap.style.gap = '6px';
+        const applyRow = document.createElement('div');
+        applyRow.style.display = 'flex';
+        applyRow.style.alignItems = 'center';
+        applyRow.style.justifyContent = 'space-between';
+        applyRow.style.gap = '10px';
+        const applyText = document.createElement('div');
+        applyText.style.display = 'grid';
+        applyText.style.gap = '2px';
+        const applyTitle = document.createElement('div');
+        applyTitle.style.fontWeight = '600';
+        applyTitle.textContent = this._t('editor.apply_enabled.title') || 'Apply schedule to this thermostat';
+        const applyDesc = document.createElement('div');
+        applyDesc.style.fontSize = '.85rem';
+        applyDesc.style.color = 'var(--secondary-text-color)';
+        applyDesc.textContent = this._t('editor.apply_enabled.desc') || '';
+        applyText.append(applyTitle, applyDesc);
+        const applySwitch = document.createElement('ha-switch');
+        applySwitch.className = 'apply-enabled-switch';
+
+        const readApplyEnabled = ()=>{
+          try {
+            const eid = String(this._settingsDraft?.entities?.[idx] || '').trim();
+            const map = (this._settingsDraft?.apply_enabled && typeof this._settingsDraft.apply_enabled === 'object') ? this._settingsDraft.apply_enabled : {};
+            const enabled = Object.prototype.hasOwnProperty.call(map, eid) ? !!map[eid] : true;
+            return { eid, enabled };
+          } catch { return { eid: String(this._settingsDraft?.entities?.[idx] || '').trim(), enabled: true }; }
+        };
+        const writeApplyEnabled = (eid, enabled)=>{
+          try {
+            if (!eid) return;
+            const prev = (this._settingsDraft.apply_enabled && typeof this._settingsDraft.apply_enabled === 'object') ? this._settingsDraft.apply_enabled : {};
+            this._settingsDraft.apply_enabled = { ...prev, [eid]: !!enabled };
+          } catch {}
+        };
+        const applyApplyEnabledUi = ()=>{
+          const { enabled } = readApplyEnabled();
+          try { applySwitch.checked = !!enabled; } catch {}
+        };
+        applySwitch.addEventListener('change', (e)=>{
+          try {
+            const { eid } = readApplyEnabled();
+            writeApplyEnabled(eid, !!e.target.checked);
+            applyApplyEnabledUi();
+          } catch {}
+        });
+        applyApplyEnabledUi();
+        applyRow.append(applyText, applySwitch);
+        applyWrap.append(applyRow);
+
         // Per-room: temperature sensor override (for display + boiler)
         const tempWrap = document.createElement('div');
         tempWrap.style.display = 'grid';
@@ -12547,7 +12706,7 @@ class ThermostatTimelineCard extends HTMLElement {
           } catch {}
         });
 
-        left.append(modeRow, pick, nameLabel, nameInp, tempWrap, turnOnWrap, linkWrap, chips);
+        left.append(modeRow, pick, nameLabel, nameInp, tempWrap, turnOnWrap, applyWrap, linkWrap, chips);
         try { linkWrap.append(linkLabel, linkPicker); } catch {}
         details.append(left);
 
@@ -19873,6 +20032,7 @@ class ThermostatTimelineCardEditor extends HTMLElement {
         labels: this._config.labels,
         temp_sensors: this._config.temp_sensors,
         turn_on: this._config.turn_on,
+        apply_enabled: this._config.apply_enabled,
 
         backup_auto_enabled: !!this._config.backup_auto_enabled,
         backup_interval_min: Number(this._config.backup_interval_min||1440),
@@ -21556,6 +21716,72 @@ class ThermostatTimelineCardEditor extends HTMLElement {
     turnOnOrderRow.append(orderLbl, orderSel);
     turnOnWrap.append(turnOnRow, turnOnOrderRow);
 
+    // Per-room: enable/disable applying the schedule to the actual entity.
+    const applyWrap = document.createElement('div');
+    applyWrap.style.display = 'grid';
+    applyWrap.style.gap = '6px';
+    const applyRow = document.createElement('div');
+    applyRow.style.display = 'flex';
+    applyRow.style.alignItems = 'center';
+    applyRow.style.justifyContent = 'space-between';
+    applyRow.style.gap = '10px';
+    const applyText = document.createElement('div');
+    applyText.style.display = 'grid';
+    applyText.style.gap = '2px';
+    const applyTitle = document.createElement('div');
+    applyTitle.style.fontWeight = '600';
+    applyTitle.textContent = this._t('editor.apply_enabled.title') || 'Apply schedule to this thermostat';
+    const applyDesc = document.createElement('div');
+    applyDesc.style.fontSize = '.85rem';
+    applyDesc.style.color = 'var(--secondary-text-color)';
+    applyDesc.textContent = this._t('editor.apply_enabled.desc') || '';
+    applyText.append(applyTitle, applyDesc);
+    const applySwitch = document.createElement('ha-switch');
+    applySwitch.className = 'apply-enabled-switch';
+
+    const readApplyEnabled = ()=>{
+      try {
+        const eid = this._config.entities[idx];
+        const map = (this._config.apply_enabled && typeof this._config.apply_enabled === 'object') ? this._config.apply_enabled : {};
+        const enabled = (eid && Object.prototype.hasOwnProperty.call(map, eid)) ? !!map[eid] : true;
+        return { eid, enabled };
+      } catch { return { eid: this._config.entities[idx], enabled: true }; }
+    };
+    const writeApplyEnabled = (eid, enabled)=>{
+      try {
+        if (!eid) return;
+        const prev = (this._config.apply_enabled && typeof this._config.apply_enabled === 'object') ? this._config.apply_enabled : {};
+        this._config.apply_enabled = { ...prev, [eid]: !!enabled };
+      } catch {}
+      try {
+        const raw = localStorage.getItem(this._localStoreKey()) || '';
+        let parsed = {};
+        try { parsed = JSON.parse(raw || '{}'); } catch { parsed = {}; }
+        const schedules = parsed.schedules || {};
+        const prevSettings = parsed.settings || {};
+        const settings = { ...prevSettings, apply_enabled: { ...(prevSettings.apply_enabled||{}), ...(this._config.apply_enabled||{}) } };
+        localStorage.setItem(this._localStoreKey(), JSON.stringify({ schedules, settings }));
+      } catch {}
+      try { this._pushSettingsToStoreDebounced(); } catch {}
+      try { window.dispatchEvent(new CustomEvent('thermostat-timeline-refresh')); } catch {}
+      try { document.querySelectorAll('thermostat-timeline-card').forEach(el=>el?.devRefreshFromEditor?.()); } catch {}
+    };
+    const applyApplyEnabledUi = ()=>{
+      const { enabled } = readApplyEnabled();
+      try { applySwitch.checked = !!enabled; } catch {}
+    };
+    applySwitch.addEventListener('change', (e)=>{
+      try {
+        const { eid } = readApplyEnabled();
+        writeApplyEnabled(eid, !!e.target.checked);
+        applyApplyEnabledUi();
+        this._emit(true);
+      } catch {}
+    });
+    applyApplyEnabledUi();
+    applyRow.append(applyText, applySwitch);
+    applyWrap.append(applyRow);
+
     // Merge/Link section
   const linkWrap = document.createElement('div');
   linkWrap.style.display = 'grid';
@@ -21599,7 +21825,7 @@ class ThermostatTimelineCardEditor extends HTMLElement {
     const chips = document.createElement('div');
     chips.className = 'linked-chips';
 
-  left.append(pick, nameInp, turnOnWrap, linkWrap, chips);
+  left.append(pick, nameInp, turnOnWrap, applyWrap, linkWrap, chips);
   // Insert mode toggle at the top
   try { left.insertBefore(modeRow, left.firstChild); } catch { left.prepend(modeRow); }
   // Hide merge UI when controlling input_number

@@ -10,7 +10,12 @@ from homeassistant.config_entries import ConfigEntry  # type: ignore[reportMissi
 from homeassistant.helpers import config_validation as cv  # type: ignore[reportMissingImports]
 from homeassistant.helpers.storage import Store  # type: ignore[reportMissingImports]
 from homeassistant.helpers.dispatcher import async_dispatcher_send, async_dispatcher_connect  # type: ignore[reportMissingImports]
-from homeassistant.helpers.event import async_track_point_in_utc_time, async_track_state_change_event, async_track_time_interval  # type: ignore[reportMissingImports]
+from homeassistant.helpers.event import (
+    async_track_point_in_utc_time,
+    async_track_state_change_event,
+    async_track_time_interval,
+    async_call_later,
+) # type: ignore[reportMissingImports]
 from homeassistant.util import dt as dt_util  # type: ignore[reportMissingImports]
 from datetime import timedelta
 from homeassistant.components.http import HomeAssistantView  # type: ignore[reportMissingImports]
@@ -23,7 +28,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 _LOGGER = logging.getLogger(__name__)
-
+_LOGGER.warning("ThermostatTimeline MULTI SYNC ENTER")
 
 def _norm_instance_id(raw: Any) -> str:
     """Normalize an instance id used to namespace schedules/settings.
@@ -398,7 +403,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _ensure_instances_loaded(hass)
         instances = hass.data[DOMAIN].setdefault("instances", {})
         iid_in_call = "instance_id" in call.data
-        iid = _norm_instance_id(call.data.get("instance_id")) if iid_in_call else _norm_instance_id(hass.data[DOMAIN].get("active_instance_id") or "default")
+        iid = _norm_instance_id(call.data.get("instance_id")) if iid_in_call else _norm_instance_id(
+            hass.data[DOMAIN].get("active_instance_id") or "default"
+        )
+
+        # DEBUG temporaire : vérifier ce que le frontend envoie réellement
+        try:
+            dbg_settings = call.data.get("settings") or {}
+            dbg_apply = dbg_settings.get("apply_enabled") or {}
+
+            dbg_schedules = call.data.get("schedules") or {}
+
+            def _temps(eid):
+                row = dbg_schedules.get(eid) or {}
+                blocks = row.get("blocks") or []
+                return [
+                    {
+                        "start": b.get("startMin"),
+                        "end": b.get("endMin"),
+                        "temp": b.get("temp"),
+                    }
+                    for b in blocks
+                    if isinstance(b, dict)
+                ]
+
+            _LOGGER.warning(
+                "ThermostatTimeline set_store DEBUG: iid=%s force=%s "
+                "apply_lucas=%s apply_oceane=%s "
+                "lucas_blocks=%s oceane_blocks=%s",
+                iid,
+                force,
+                dbg_apply.get("climate.thermostat_lucas_ha", "<missing>"),
+                dbg_apply.get("climate.thermostat_oceane_ha", "<missing>"),
+                _temps("climate.thermostat_lucas_ha"),
+                _temps("climate.thermostat_oceane_ha"),
+            )
+        except Exception as err:
+            _LOGGER.warning("ThermostatTimeline set_store DEBUG failed: %s", err)
 
         inst = instances.get(iid)
         if not isinstance(inst, dict):
@@ -406,10 +447,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             instances[iid] = inst
 
         cur_sched = inst.get("schedules", {}) if isinstance(inst.get("schedules"), dict) else {}
+        try:
+            dbg_sched = call.data.get("schedules")
+            _LOGGER.warning(
+                "ThermostatTimeline set_store DEBUG schedules: "
+                "iid=%s schedules_in_call=%s incoming_keys=%s current_keys=%s",
+                iid,
+                "schedules" in call.data,
+                list(dbg_sched.keys()) if isinstance(dbg_sched, dict) else "<none>",
+                list(cur_sched.keys()),
+            )
+        except Exception as err:
+            _LOGGER.warning(
+                "ThermostatTimeline set_store DEBUG schedules failed: %s",
+                err,
+            )
         cur_set = inst.get("settings", {}) if isinstance(inst.get("settings"), dict) else {}
         cur_colors = inst.get("colors", {}) if isinstance(inst.get("colors"), dict) else {}
         cur_week = inst.get("weekdays", {}) if isinstance(inst.get("weekdays"), dict) else {}
         cur_prof = inst.get("profiles", {}) if isinstance(inst.get("profiles"), dict) else {}
+
+        # DEBUG temporaire : suivre précisément "merges" pour traquer le bug
+        # "Florence revient sous Cuisine après un Ctrl+F5". On loggue à la fois
+        # ce que le frontend vient d'envoyer et ce qui était déjà stocké, pour
+        # voir si la clé "merges" est bien présente/vide dans la requête reçue,
+        # ou si elle est absente (ce qui laisserait l'ancien merges inchangé).
+        try:
+            settings_in_call = ("settings" in call.data)
+            dbg_settings2 = call.data.get("settings") or {}
+            merges_key_present = isinstance(dbg_settings2, dict) and ("merges" in dbg_settings2)
+            _LOGGER.warning(
+                "ThermostatTimeline set_store DEBUG merges: iid=%s settings_in_call=%s "
+                "merges_key_present=%s incoming_merges=%s current_stored_merges=%s",
+                iid, settings_in_call, merges_key_present,
+                dbg_settings2.get("merges") if merges_key_present else "<key absent>",
+                cur_set.get("merges"),
+            )
+        except Exception as err:
+            _LOGGER.warning("ThermostatTimeline set_store DEBUG merges failed: %s", err)
+
         changed = False
         sched_changed = False
         settings_changed = False
@@ -594,7 +670,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Switching active instance should also trigger a refresh.
         if activate and prev_active != iid:
             hass.data[DOMAIN]["version"] = int(hass.data[DOMAIN]["version"]) + 1
-        _LOGGER.info("set_store: version=%s, sched_changed=%s, settings_changed=%s", 
+        _LOGGER.info("set_store: version=%s, sched_changed=%s, settings_changed=%s",
                      hass.data[DOMAIN]["version"], sched_changed, settings_changed)
         await _save_and_broadcast()
 
@@ -1273,15 +1349,29 @@ class AutoApplyManager:
         self._next_is_resume = False
 
     async def async_start(self):
-        # Apply once on startup and schedule next if enabled
+    # Apply once on startup and schedule next if enabled
         await self._maybe_apply_now(force=True)
         await self._maybe_control_boiler(force=True)
         await self._schedule_next()
+
+        # Reconcile once more after startup, when climate entities
+        # such as Versatile Thermostat have had time to become available.
+        @callback
+        def _startup_reconcile(_now):
+            _LOGGER.warning("ThermostatTimeline STARTUP RECONCILE +30s")
+            self.hass.async_create_task(
+                self._maybe_apply_now(force=True, reconcile=True)
+            )
+
+        async_call_later(self.hass, 30, _startup_reconcile)
+
         # Re-apply on store updates
         @callback
         def _on_store_update():
             self.hass.async_create_task(self._on_store_changed())
+
         async_dispatcher_connect(self.hass, SIGNAL_UPDATED, _on_store_update)
+
         # Watch person.* states if away mode is used
         self._reset_person_watch()
         self._reset_boiler_watch()
@@ -1524,16 +1614,18 @@ class AutoApplyManager:
                         return blk
         except Exception:
             pass
-        # If row has weekly structure, use today's day list, otherwise default blocks
+        # Use weekday schedule only when weekday scheduling is actually enabled.
         try:
-            wk = row.get("weekly")
-            if wk and isinstance(wk, dict):
-                days = wk.get("days") or {}
-                arr = days.get(self._today_key())
-                if isinstance(arr, list):
-                    return arr
+            if bool(settings.get("weekdays_enabled")):
+                wk = row.get("weekly")
+                if wk and isinstance(wk, dict):
+                    days = wk.get("days") or {}
+                    arr = days.get(self._today_key())
+                    if isinstance(arr, list):
+                        return arr
         except Exception:
             pass
+
         return row.get("blocks") or []
 
     def _presence_persons(self, settings: dict) -> list[str]:
@@ -1863,6 +1955,10 @@ class AutoApplyManager:
             ok = await self._apply_setpoint(eid, float(desired))
             if ok:
                 self._last_applied[eid] = {"min": now_min, "temp": float(desired)}
+            elif getattr(self, "_last_apply_skipped_voluntarily", False):
+                # Not a real failure: the room has "Apply schedule to this
+                # thermostat" disabled. Nothing to warn about here.
+                pass
             else:
                 _LOGGER.warning("Auto-apply failed for %s", eid)
 
@@ -2540,6 +2636,9 @@ class AutoApplyManager:
         - If current mode is off/dry/fan_only, try switching to heat, else cool.
         - Fallback to single temperature set.
         """
+        # Reset per-call so a previous voluntary skip doesn't leak into an
+        # unrelated later call (e.g. for a different entity or a genuine retry).
+        self._last_apply_skipped_voluntarily = False
         try:
             # Store contract: temperatures are canonical °C.
             # Backwards compat: older clients may have stored °F when temp_unit == 'F'.
@@ -2584,6 +2683,11 @@ class AutoApplyManager:
                 )
                 if not apply_enabled:
                     _LOGGER.warning("ThermostatTimeline apply_setpoint: SKIPPED (apply_enabled=False) for %s", eid)
+                    # Mark this as a voluntary skip (not a real failure) so callers
+                    # like _maybe_apply_now can avoid logging a misleading
+                    # "Auto-apply failed" warning for something that worked exactly
+                    # as configured.
+                    self._last_apply_skipped_voluntarily = True
                     return False
             except Exception:
                 # Never let this optional gate block a legitimate apply on error.
@@ -2881,19 +2985,39 @@ class MultiInstanceAutoApplyManager:
             _ensure_instances_loaded(self.hass)
             d = self.hass.data.get(DOMAIN, {})
             instances = d.get("instances") if isinstance(d.get("instances"), dict) else {}
+            active_iid = _norm_instance_id(
+                d.get("active_instance_id") or "default"
+            )
+            _LOGGER.warning(
+                "ThermostatTimeline MULTI SYNC DATA: active=%s instances=%s",
+                d.get("active_instance_id"),
+                list(instances.keys()),
+            )
             for iid in (instances.keys() if isinstance(instances, dict) else []):
                 try:
                     iidn = _norm_instance_id(iid)
+
+                    # Only the active Timeline instance is allowed to drive thermostats.
+                    if iidn != active_iid:
+                        continue
+
                     if iidn in self._managers:
                         continue
+
                     mgr = AutoApplyManager(self.hass, instance_id=iidn)
                     self._managers[iidn] = mgr
                     await mgr.async_start()
+
                 except Exception:
+                    _LOGGER.exception(
+                        "ThermostatTimeline MULTI SYNC manager failed for iid=%s",
+                        iid if 'iid' in locals() else '?',
+                    )
                     continue
             # Expose for other components
             d["instance_managers"] = self._managers
         except Exception:
+            _LOGGER.exception("ThermostatTimeline MULTI SYNC FAILED")
             return
 
 

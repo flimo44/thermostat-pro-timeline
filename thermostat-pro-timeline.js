@@ -6445,7 +6445,7 @@ class ThermostatTimelineCard extends HTMLElement {
           };
           // If labels were explicitly edited in this session, allow an empty object to clear labels
           if (!this._labelsTouched) keepIfEmpty('labels');
-          keepIfEmpty('merges');
+          //keepIfEmpty('merges');
           keepIfEmpty('temp_sensors');
           payload = { ...payload, settings: merged };
         } catch {}
@@ -9505,7 +9505,7 @@ class ThermostatTimelineCard extends HTMLElement {
         };
         // Respect explicit label edits: allow an empty object to clear labels when touched
         if (!this._labelsTouched) keepIfEmpty('labels');
-        keepIfEmpty('merges');
+        //keepIfEmpty('merges');
         keepIfEmpty('temp_sensors');
         payload = { ...payload, settings: merged };
       } catch {}
@@ -11733,6 +11733,10 @@ class ThermostatTimelineCard extends HTMLElement {
             if (cleaned.length) out[primary] = cleaned;
           }
           cfg.merges = out;
+          console.warn(
+            "TT DEBUG MERGE COMMIT",
+            JSON.stringify(cfg.merges ?? null)
+          );
         } catch {}
 
         // Temp sensors: keep only for active rooms
@@ -12794,6 +12798,26 @@ class ThermostatTimelineCard extends HTMLElement {
               this._settingsDraft.turn_on = t;
             } catch {}
 
+            // Clean schedule
+            try {
+              console.warn(
+                "[Timeline DEBUG delete room]",
+                "primary=", primary,
+                "scheduleExists=", Object.prototype.hasOwnProperty.call(this._schedules || {}, primary),
+                "keysBefore=", Object.keys(this._schedules || {})
+              );
+
+              if (primary) {
+                delete this._schedules[primary];
+              }
+
+              console.warn(
+                "[Timeline DEBUG delete room]",
+                "keysAfter=", Object.keys(this._schedules || {})
+              );
+            } catch (e) {
+              console.error("[Timeline DEBUG delete room] ERROR", e);
+            }
             this._settingsDraft.entities = arr;
             this._settingsDraft.room_use_input_number = modes;
             this._settingsDraft.room_use_temp_sensor = tmodes;

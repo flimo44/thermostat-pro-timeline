@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import traceback
 
 from homeassistant.core import HomeAssistant, ServiceCall, callback  # type: ignore[reportMissingImports]
@@ -27,8 +28,6 @@ from .const import DOMAIN, STORAGE_KEY, STORAGE_VERSION, SIGNAL_UPDATED, BACKUP_
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
-_LOGGER = logging.getLogger(__name__)
-_LOGGER.warning("ThermostatTimeline MULTI SYNC ENTER")
 
 def _norm_instance_id(raw: Any) -> str:
     """Normalize an instance id used to namespace schedules/settings.
@@ -427,17 +426,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if isinstance(b, dict)
                 ]
 
-            _LOGGER.warning(
-                "ThermostatTimeline set_store DEBUG: iid=%s force=%s "
-                "apply_lucas=%s apply_oceane=%s "
-                "lucas_blocks=%s oceane_blocks=%s",
-                iid,
-                force,
-                dbg_apply.get("climate.thermostat_lucas_ha", "<missing>"),
-                dbg_apply.get("climate.thermostat_oceane_ha", "<missing>"),
-                _temps("climate.thermostat_lucas_ha"),
-                _temps("climate.thermostat_oceane_ha"),
-            )
         except Exception as err:
             _LOGGER.warning("ThermostatTimeline set_store DEBUG failed: %s", err)
 
@@ -449,14 +437,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         cur_sched = inst.get("schedules", {}) if isinstance(inst.get("schedules"), dict) else {}
         try:
             dbg_sched = call.data.get("schedules")
-            _LOGGER.warning(
-                "ThermostatTimeline set_store DEBUG schedules: "
-                "iid=%s schedules_in_call=%s incoming_keys=%s current_keys=%s",
-                iid,
-                "schedules" in call.data,
-                list(dbg_sched.keys()) if isinstance(dbg_sched, dict) else "<none>",
-                list(cur_sched.keys()),
-            )
+
         except Exception as err:
             _LOGGER.warning(
                 "ThermostatTimeline set_store DEBUG schedules failed: %s",
@@ -476,13 +457,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             settings_in_call = ("settings" in call.data)
             dbg_settings2 = call.data.get("settings") or {}
             merges_key_present = isinstance(dbg_settings2, dict) and ("merges" in dbg_settings2)
-            _LOGGER.warning(
-                "ThermostatTimeline set_store DEBUG merges: iid=%s settings_in_call=%s "
-                "merges_key_present=%s incoming_merges=%s current_stored_merges=%s",
-                iid, settings_in_call, merges_key_present,
-                dbg_settings2.get("merges") if merges_key_present else "<key absent>",
-                cur_set.get("merges"),
-            )
+
         except Exception as err:
             _LOGGER.warning("ThermostatTimeline set_store DEBUG merges failed: %s", err)
 
@@ -1291,6 +1266,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN]["schedules"] = {}
         hass.data[DOMAIN]["version"] = int(hass.data[DOMAIN]["version"]) + 1
         await _save_and_broadcast()
+    async def reload_frontend(call):
+        """Redeploy Timeline JS and refresh Lovelace cache-buster."""
+        try:
+            from .frontend import ensure_frontend
+
+            await ensure_frontend(hass)
+
+            _LOGGER.info(
+                "ThermostatTimeline frontend reloaded and Lovelace resource refreshed"
+            )
+
+        except Exception:
+            _LOGGER.exception(
+                "ThermostatTimeline frontend reload failed"
+            )
 
     hass.services.async_register(DOMAIN, "set_store", set_store)
     hass.services.async_register(DOMAIN, "clear_store", clear_store)
@@ -1303,6 +1293,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "restore_now", restore_now)
     hass.services.async_register(DOMAIN, "patch_entity", patch_entity)
     hass.services.async_register(DOMAIN, "clear", clear)
+    
+    hass.services.async_register(
+        DOMAIN,
+        "reload_frontend",
+        reload_frontend,
+    )
     # no apply_now service (removed)
 
     # Expose lightweight HTTP views for clients (works over HA Cloud)
@@ -1347,6 +1343,7 @@ class AutoApplyManager:
         self._last_pause_sensor_on: bool | None = None
         self._last_applied = {}  # eid -> {"min": int, "temp": float}
         self._next_is_resume = False
+        self._next_room_resume = None
 
     async def async_start(self):
     # Apply once on startup and schedule next if enabled
@@ -1358,7 +1355,6 @@ class AutoApplyManager:
         # such as Versatile Thermostat have had time to become available.
         @callback
         def _startup_reconcile(_now):
-            _LOGGER.warning("ThermostatTimeline STARTUP RECONCILE +30s")
             self.hass.async_create_task(
                 self._maybe_apply_now(force=True, reconcile=True)
             )
@@ -2036,62 +2032,158 @@ class AutoApplyManager:
         # build dt in UTC
         return dt_util.as_utc(now + timedelta(minutes=best_delta or 1))
 
+    def _next_room_pause_dt(self):
+        """Return (datetime_utc, primary_eid) for the next timed room-pause expiry."""
+        try:
+            _schedules, settings = self._get_data()
+            room_pause = settings.get("room_pause") or {}
+            if not isinstance(room_pause, dict):
+                return None, None
+
+            now_ms = dt_util.utcnow().timestamp() * 1000.0
+            best_ms = None
+            best_eid = None
+
+            for eid, entry in room_pause.items():
+                if not isinstance(entry, dict):
+                    continue
+                if bool(entry.get("indef")):
+                    continue
+
+                try:
+                    until_ms = float(entry.get("until_ms") or 0)
+                except (TypeError, ValueError):
+                    continue
+
+                # Ignore expired/stale values.
+                if until_ms <= (now_ms + 250.0):
+                    continue
+
+                if best_ms is None or until_ms < best_ms:
+                    best_ms = until_ms
+                    best_eid = str(eid)
+
+            if best_ms is None:
+                return None, None
+
+            return dt_util.utc_from_timestamp(best_ms / 1000.0), best_eid
+
+        except Exception:
+            return None, None
+
+    async def _apply_room_now(self, primary_eid: str) -> None:
+        """Reconcile one room, including its merged thermostat entities."""
+        try:
+            _schedules, settings = self._get_data()
+            targets = [primary_eid]
+
+            merges = settings.get("merges") or {}
+            if isinstance(merges, dict):
+                for eid in merges.get(primary_eid, []) or []:
+                    if eid not in targets:
+                        targets.append(eid)
+
+            for eid in targets:
+                await self.async_apply_entity_now(eid, reconcile=True)
+
+        except Exception:
+            _LOGGER.warning(
+                "ThermostatTimeline room pause resume failed for %s",
+                primary_eid,
+                exc_info=True,
+            )
+
     async def _schedule_next(self):
-        # cancel previous
+        # Cancel the previous timer.
         if self._unsub_timer:
             self._unsub_timer()
             self._unsub_timer = None
+
+        self._next_is_resume = False
+        self._next_room_resume = None
+
+        room_wake, room_eid = self._next_room_pause_dt()
+
         if not self._auto_apply_enabled():
-            # If paused indefinitely, do not schedule anything
+            # Do not schedule normal boundaries while auto-apply is paused.
+            # A timed global or per-room pause can still provide a wake-up.
             _s, settings = self._get_data()
             if bool(settings.get("pause_indef")):
-                return
-            # If paused until a time, schedule wake-up then
-            wake = self._paused_until_dt()
-            if not wake:
-                return
-            boundary = None
+                wake = None
+                boundary = None
+            else:
+                wake = self._paused_until_dt()
+                boundary = None
         else:
             wake = self._paused_until_dt()
             boundary = self._next_boundary_dt()
-        # choose earliest available
-        if wake and boundary:
-            self._next_is_resume = wake <= boundary
-            when = wake if self._next_is_resume else boundary
-        elif wake:
-            self._next_is_resume = True
-            when = wake
-        else:
-            self._next_is_resume = False
-            when = boundary
 
-        if not when:
+        candidates = []
+
+        if boundary:
+            candidates.append(("boundary", boundary, None))
+        if wake:
+            candidates.append(("global_resume", wake, None))
+        if room_wake and room_eid:
+            candidates.append(("room_resume", room_wake, room_eid))
+
+        if not candidates:
             return
 
-        # Never schedule in the past (HA will execute immediately), which can
-        # otherwise turn stale timestamps into a hot loop. Timers are minute-
-        # granularity here, so clamp to at least +1 minute.
+        kind, when, room_eid = min(candidates, key=lambda item: item[1])
+
+        self._next_is_resume = kind == "global_resume"
+        self._next_room_resume = room_eid if kind == "room_resume" else None
+
         try:
             when = dt_util.as_utc(when)
         except Exception:
             pass
+
+        # Never schedule in the past. A one-second clamp is enough here because
+        # room-pause expiry timestamps have sub-minute precision.
         try:
             now_utc = dt_util.utcnow()
             if when <= now_utc:
-                when = now_utc + timedelta(minutes=1)
+                when = now_utc + timedelta(seconds=1)
         except Exception:
             pass
+
         @callback
         def _cb(_now):
             self.hass.async_create_task(self._timer_fire())
+
         self._unsub_timer = async_track_point_in_utc_time(self.hass, _cb, when)
 
     async def _timer_fire(self):
-        # If this wake was caused by pause expiry, reconcile immediately across all entities.
-        resume = bool(self._next_is_resume)
-        await self._maybe_apply_now(force=True, boundary_only=(not resume), reconcile=resume)
-        await self._maybe_control_boiler(force=True)
+        room_resume = self._next_room_resume
+        global_resume = bool(self._next_is_resume)
+
+        self._next_room_resume = None
         self._next_is_resume = False
+
+        if room_resume:
+            _LOGGER.warning(
+                "ThermostatTimeline ROOM PAUSE RESUME: %s",
+                room_resume,
+            )
+            await self._apply_room_now(room_resume)
+
+        elif global_resume:
+            await self._maybe_apply_now(
+                force=True,
+                boundary_only=False,
+                reconcile=True,
+            )
+
+        else:
+            await self._maybe_apply_now(
+                force=True,
+                boundary_only=True,
+                reconcile=False,
+            )
+
+        await self._maybe_control_boiler(force=True)
         await self._schedule_next()
 
     def _reset_boiler_watch(self):
@@ -2689,6 +2781,35 @@ class AutoApplyManager:
                     # as configured.
                     self._last_apply_skipped_voluntarily = True
                     return False
+            except Exception:
+                # Never let this optional gate block a legitimate apply on error.
+                pass
+
+            # Per-room pause: temporary suppression independent of the global
+            # pause_indef/pause_until_ms fields. Mirrors the same semantics
+            # (indefinite, or a timed until_ms in the future) but scoped to a
+            # single room via settings["room_pause"][primary_eid]. Uses the
+            # same primary-entity resolution as apply_enabled above so a
+            # merged/secondary entity correctly inherits its room's pause.
+            try:
+                room_pause_map = settings.get("room_pause") or {}
+                entry = room_pause_map.get(primary_for_apply) if isinstance(room_pause_map, dict) else None
+                if isinstance(entry, dict):
+                    is_indef = bool(entry.get("indef"))
+                    until_ms = entry.get("until_ms")
+                    now_ms = time.time() * 1000.0
+                    is_timed_active = False
+                    try:
+                        is_timed_active = float(until_ms) > now_ms
+                    except (TypeError, ValueError):
+                        is_timed_active = False
+                    if is_indef or is_timed_active:
+                        _LOGGER.warning(
+                            "ThermostatTimeline apply_setpoint: SKIPPED (room_pause active) for %s (primary=%s)",
+                            eid, primary_for_apply,
+                        )
+                        self._last_apply_skipped_voluntarily = True
+                        return False
             except Exception:
                 # Never let this optional gate block a legitimate apply on error.
                 pass

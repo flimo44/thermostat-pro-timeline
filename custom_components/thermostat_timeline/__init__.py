@@ -27,7 +27,7 @@ from .const import DOMAIN, STORAGE_KEY, STORAGE_VERSION, SIGNAL_UPDATED, BACKUP_
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-
+_LOGGER = logging.getLogger(__name__)
 
 def _norm_instance_id(raw: Any) -> str:
     """Normalize an instance id used to namespace schedules/settings.
@@ -1340,6 +1340,7 @@ class AutoApplyManager:
         self._unsub_boiler = None
         self._unsub_boiler_interval = None
         self._unsub_pause_sensor = None
+        self._unsub_targets = None
         self._last_pause_sensor_on: bool | None = None
         self._last_applied = {}  # eid -> {"min": int, "temp": float}
         self._next_is_resume = False
@@ -1355,6 +1356,7 @@ class AutoApplyManager:
         # such as Versatile Thermostat have had time to become available.
         @callback
         def _startup_reconcile(_now):
+            _LOGGER.debug("ThermostatTimeline STARTUP RECONCILE +30s")
             self.hass.async_create_task(
                 self._maybe_apply_now(force=True, reconcile=True)
             )
@@ -1373,6 +1375,7 @@ class AutoApplyManager:
         self._reset_boiler_watch()
         self._reset_boiler_interval()
         self._reset_pause_sensor_watch()
+        self._reset_target_recovery_watch()
 
     async def _on_store_changed(self):
         # Respect apply_on_edit toggle: only apply immediately on store changes when enabled
@@ -1385,6 +1388,7 @@ class AutoApplyManager:
         self._reset_boiler_watch()
         self._reset_boiler_interval()
         self._reset_pause_sensor_watch()
+        self._reset_target_recovery_watch()
 
     def _pause_sensor_on(self, settings: dict) -> bool:
         """Return True when pause is requested via binary sensor."""
@@ -2292,7 +2296,86 @@ class AutoApplyManager:
             self._unsub_boiler_interval = async_track_time_interval(self.hass, _tick, timedelta(minutes=10))
         except Exception:
             self._unsub_boiler_interval = None
-
+    
+    def _reset_target_recovery_watch(self):
+        """Reconcile a scheduled entity when its target temperature becomes available."""
+    
+        if self._unsub_targets is not None:
+            try:
+                self._unsub_targets()
+            except Exception:
+                pass
+            self._unsub_targets = None
+    
+        try:
+            schedules, settings = self._get_data()
+            merges = settings.get("merges") or {}
+            targets = list(self._all_targets(schedules, merges))
+        except Exception:
+            return
+    
+        targets = [
+            eid for eid in targets
+            if isinstance(eid, str)
+            and (eid.startswith("climate.") or eid.startswith("input_number."))
+        ]
+    
+        if not targets:
+            return
+    
+        @callback
+        def _target_state_changed(event):
+            eid = event.data.get("entity_id")
+            old_state = event.data.get("old_state")
+            new_state = event.data.get("new_state")
+    
+            if not eid or new_state is None:
+                return
+    
+            def _target_temp(st):
+                if st is None:
+                    return None
+    
+                if eid.startswith("input_number."):
+                    try:
+                        return float(st.state)
+                    except (TypeError, ValueError):
+                        return None
+    
+                for attr in ("temperature", "target_temperature", "target_temp"):
+                    try:
+                        value = st.attributes.get(attr)
+                        if isinstance(value, (int, float)):
+                            return float(value)
+                    except Exception:
+                        pass
+    
+                return None
+    
+            old_temp = _target_temp(old_state)
+            new_temp = _target_temp(new_state)
+    
+            if new_temp is None:
+                return
+    
+            if old_temp is not None:
+                return
+    
+            _LOGGER.info(
+                "ThermostatTimeline TARGET READY: %s target=%s -> reconcile",
+                eid,
+                new_temp,
+            )
+    
+            self.hass.async_create_task(
+                self.async_apply_entity_now(eid, reconcile=True)
+            )
+    
+        self._unsub_targets = async_track_state_change_event(
+            self.hass,
+            targets,
+            _target_state_changed,
+        )
     def _reset_pause_sensor_watch(self) -> None:
         if self._unsub_pause_sensor:
             try:

@@ -408,6 +408,20 @@ Utilities
 - `factory_reset`: Delete integration storage files and recreate empty (removes all instances, schedules, settings, backups).
 
 
+## External room sensors and device Boost mode
+
+Selecting an external room temperature sensor changes the room temperature shown
+by the card. With boiler control disabled, this does not change the scheduled
+target sent to the radiator thermostat. Timeline does not forward temperature
+measurements into a thermostat's manufacturer-specific external-sensor input;
+keep any device-specific automation that performs that transfer.
+
+Device Boost mode is not a Timeline pause. A scheduled application can select a
+supported `manual` or `hold` preset and send the scheduled temperature, interrupting
+Boost. A thermostat's own five-minute Boost timeout does not change the saved
+Timeline schedule. Pause Timeline while you want device-local control; the exact
+Boost timeout remains the thermostat's responsibility.
+
 ## 🌍 Internationalization (languages and detection)
 
 The card is localized and auto‑selects language by:

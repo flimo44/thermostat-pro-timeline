@@ -4453,7 +4453,7 @@ function ttLocalize(key, langOrHass) {
 // Simple runtime version to help with cache-busting diagnostics in HA.
 // Update this when shipping changes so the version appears in the
 // "Custom cards" panel and in logs.
-const TT_CARD_VERSION = "2026.02.08-seasonal";
+const TT_CARD_VERSION = "3.2.5";
 
 class ThermostatTimelineCard extends HTMLElement {
   static get version() { return TT_CARD_VERSION; }
@@ -4705,6 +4705,7 @@ class ThermostatTimelineCard extends HTMLElement {
   // ---------- Config ----------
     setConfig(config) {
     if (!config || !Array.isArray(config.entities)) throw new Error(ttLocalize('err.config_entities', navigator.language || 'en'));
+    const savedConfig = this._hasConfig ? this._config : null;
     const prevDefault = Number(this._config?.default_temp);
     const yamlSetsDefault = Object.prototype.hasOwnProperty.call(config, 'default_temp');
     let rowh = Number(config.row_height ?? 64); rowh = isNaN(rowh) ? 64 : Math.max(40, Math.min(120, Math.round(rowh)));
@@ -4974,6 +4975,14 @@ class ThermostatTimelineCard extends HTMLElement {
       }
     } catch {}
 
+    // Preserve card/shared settings when HA resends YAML with omitted keys.
+    if (savedConfig) {
+      for (const key of Object.keys(this._yamlProvided)) {
+        if (!this._yamlProvided[key] && Object.prototype.hasOwnProperty.call(savedConfig, key)) {
+          this._config[key] = savedConfig[key];
+        }
+      }
+    }
     if (this._initialized) {
       this._ensureSchedules();
       // Extra safety: if YAML changed default_temp, propagate to rows that

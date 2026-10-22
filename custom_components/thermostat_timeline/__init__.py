@@ -3138,7 +3138,6 @@ class AutoApplyManager:
             if turn_on_order == "before":
                 await _turn_on_and_delay()
             await self.hass.services.async_call("climate", "set_temperature", data, blocking=False)
-            _LOGGER.warning("ThermostatTimeline apply_setpoint: SENT set_temperature=%s to %s", data.get("temperature"), eid)
             await _mode_after_if_needed()
             if turn_on_order == "after":
                 try:
